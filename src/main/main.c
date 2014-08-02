@@ -24,8 +24,8 @@
 #include "./uart.c"
 
 
-#define PIMD_PULSE_OFF_MS 1
-#define PIMD_PULSE_ON_US 50
+#define PIMD_PULSE_OFF_MS 5
+#define PIMD_PULSE_ON_US 150
 
 #define PIMD_IO_PULSE_DDR DDRC
 #define PIMD_IO_PULSE_PORT PORTC
@@ -36,8 +36,13 @@
 #define PIMD_IO_CALIB_DDR DDRC
 #define PIMD_IO_CALIB_PORT PORTC
 #define PIMD_IO_CALIB_MASK (1 << 0)
-#endif /* e */TODO
+#endif /* TODO */
 
+/* pcint23, ain1, pd7 */
+#define PIMD_IO_BEMF_DDR DDRD
+#define PIMD_IO_BEMF_PIN PIND
+#define PIMD_IO_BEMF_PORT PORTD
+#define PIMD_IO_BEMF_MASK (1 << 7)
 
 /* pulse routines */
 
@@ -55,20 +60,93 @@ static void pimd_setup(void)
 {
   PIMD_IO_PULSE_DDR |= PIMD_IO_PULSE_MASK;
   pimd_pulse_off();
+
+  /* PIMD_IO_BEMF as an input */
+  PIMD_IO_BEMF_DDR &= ~PIMD_IO_BEMF_MASK;
+  PIMD_IO_BEMF_PORT |= PIMD_IO_BEMF_MASK;
+
+/* #define CONFIG_ACMP */
+#ifdef CONFIG_ACMP
+  /* setup analog comparator. datasheet ch22. */
+  /* when AIN0(bandgap) > AIN1, then ACO is set */
+  /* setup to capture the value of counter1 */
+  /* AIN0 is set to bandgap voltage reference (1.81) */
+  /* AIN1 is wired to pin PIMD_IO_BEMF */
+  ADCSRB = 1 << 6;
+  ACSR = (1 << 7) | (1 << 6) | (1 << 2);
+  DIDR1 = (1 << 1) | (1 << 0);
+#endif /* CONFIG_ACMP */
+
+  /* setup timer */
+  /* normal counter */
+  /* noise canceler enabled */
+  /* inverted capture edge */
+  TCCR1A = 0;
+  TCCR1B = (1 << 7) | (1 << 6);
+
+#ifdef CONFIG_ACMP
+  TIMSK1 = 1 << 5;
+#endif /* CONFIG_ACMP */
 }
 
 static void pimd_pulse_do(uint16_t* n)
 {
   /* n the captured counter value */
 
+  /* clear the ICF1 flag by writing one */
+  TIFR1 |= 1 << 5;
+
+  /* actual pulse */
   pimd_pulse_on();
   _delay_us(PIMD_PULSE_ON_US);
   pimd_pulse_off();
 
-  /* start the timer */
+  /* set counter to 0 and enable */
+  TCNT1 = 0;
+  TCCR1B |= 1 << 0;
 
-  /* wait for the capture or timer overflow */
+#if 1
+  /* wait for the pin to be 0 */
+  while (1)
+  {
+    if ((PIMD_IO_BEMF_PIN & PIMD_IO_BEMF_MASK) == 0) break ;
+  }
+#endif
 
+#ifdef CONFIG_ACMP
+  /* enable the comparator */
+  ACSR &= ~(1 << 7);
+
+  /* wait for the capture or timer top value */
+  while (1)
+  {
+    /* wait event capture by polling ICF1 */
+    if (TIFR1 | (1 << 5))
+    {
+      *n = ICR1;
+      break ;
+    }
+  }
+#else
+  while (1)
+  {
+    if (PIMD_IO_BEMF_PIN & PIMD_IO_BEMF_MASK)
+    {
+      *n = TCNT1;
+      break ;
+    }
+  }
+#endif
+
+  /* disable counter */
+  TCCR1B &= ~(1 << 0);
+
+#ifdef CONFIG_ACMP
+  /* disable the comparator */
+  ACSR |= 1 << 7;
+#endif /* CONFIG_ACMP */
+
+  /* wait before next pulse */
   _delay_ms(PIMD_PULSE_OFF_MS);
 }
 
@@ -81,21 +159,22 @@ int main(void)
   uart_setup();
   pimd_setup();
 
+  uart_write((uint8_t*)"go\r\n", 4);
+
+  sei();
+
   while (1)
   {
-    /* average 8 times */
+    /* averaging loop */
     sum = 0;
-    for (i = 0; i != 8; ++i)
+    for (i = 0; i != 64; ++i)
     {
       pimd_pulse_do(&n);
       sum += n;
     }
 
-    uart_write(uint32_to_string(sum), 8);
+    uart_write(uint32_to_string(sum / i), 8);
     uart_write((uint8_t*)"\r\n", 2);
-
-    /* do it 4 times per second */
-    _delay_ms(250);
   }
 
   return 0;
