@@ -6,12 +6,11 @@
 /* metal detection is to measure the time for the back emf */
 /* to decay, as this time varies with the presence of metal. */
 /* to do so, ADC can not be used as the required sampling */
-/* is too high. instead, a timer is started and is captured */
-/* when the voltage on PIMD_IO_BACKEMF reaches a threshold */
-/* PIMD_BACKEMF_THRESH. for this purpose, the compare and */
-/* capture hardware logic is used. metal is detected with */
-/* variation of the captured timer value relative to what */
-/* it is when no metal is present. */
+/* is too high. instead, a counter is started and is captured */
+/* when the voltage on PIMD_IO_BACKEMF reaches a digital one */
+/* or some maximum value. metal is detected with variation of */
+/* the captured counter value relative to what it is when no */
+/* metal is present, measured during a calibration phase. */
 /* the circuit largely relies on this one, but some stages */
 /* have been replaced using the microcontroller hardware: */
 /* http://oldradiobuilder.com/mdetsp.html */
