@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <avr/io.h>
+#include <avr/sleep.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
 #include "./uart.c"
@@ -32,41 +33,46 @@ static const uint16_t PIMD_WAIT_ZERO_TICKS = US_TO_TICKS(50);
 static const uint16_t PIMD_WAIT_ONE_TICKS = US_TO_TICKS(200);
 
 /* pulse on off durations */
-#define PIMD_PULSE_OFF_MS 5
+#define PIMD_PULSE_OFF_MS 4
 #define PIMD_PULSE_ON_US 150
+
+/* averaging loop count. with pimd_pulse_off, it gives */
+/* roughly the number of actual sample per second */
+#define PIMD_AVG_COUNT ((uint8_t)25)
+
+/* backemf amplified to digital level, must be icp1 pin */
+#define PIMD_IO_BEMF_DDR DDRB
+#define PIMD_IO_BEMF_PIN PINB
+#define PIMD_IO_BEMF_PORT PORTB
+#define PIMD_IO_BEMF_MASK (1 << 0)
 
 /* mosfet gate control */
 #define PIMD_IO_PULSE_DDR DDRC
 #define PIMD_IO_PULSE_PORT PORTC
 #define PIMD_IO_PULSE_MASK (1 << 0)
 
-/* calibration button */
-#define PIMD_IO_CALIB_DDR DDRC
-#define PIMD_IO_CALIB_PIN PINC
-#define PIMD_IO_CALIB_PORT PORTC
-#define PIMD_IO_CALIB_MASK (1 << 0)
-
-/* detect switch */
-#define PIMD_IO_DETECT_DDR DDRC
-#define PIMD_IO_DETECT_PIN PINC
-#define PIMD_IO_DETECT_PORT PORTC
-#define PIMD_IO_DETECT_MASK (1 << 0)
-
-/* detect led */
-#define PIMD_LED_DETECT_DDR DDRC
-#define PIMD_LED_DETECT_PORT PORTC
-#define PIMD_LED_DETECT_MASK (1 << 0)
+/* calibration button and detect switch */
+/* WARNING: change isr vector if not PORTC */
+/* portc1 is pcint9 */
+/* portc2 is pcint10 */
+#define PIMD_IO_COMMON_DDR DDRC
+#define PIMD_IO_COMMON_PIN PINC
+#define PIMD_IO_COMMON_PORT PORTC
+#define PIMD_IO_CALIB_MASK (1 << 1)
+#define PIMD_IO_DETECT_MASK (1 << 2)
+#define PIMD_IO_COMMON_PCICR_MASK (1 << 1)
+#define PIMD_IO_COMMON_PCMSK PCMSK1
 
 /* not calibrated led */
 #define PIMD_LED_CALIB_DDR DDRC
 #define PIMD_LED_CALIB_PORT PORTC
-#define PIMD_LED_CALIB_MASK (1 << 0)
+#define PIMD_LED_CALIB_MASK (1 << 3)
 
-/* backemf amplified to digital level, icp1 pin */
-#define PIMD_IO_BEMF_DDR DDRB
-#define PIMD_IO_BEMF_PIN PINB
-#define PIMD_IO_BEMF_PORT PORTB
-#define PIMD_IO_BEMF_MASK (1 << 0)
+/* detect led */
+#define PIMD_LED_DETECT_DDR DDRC
+#define PIMD_LED_DETECT_PORT PORTC
+#define PIMD_LED_DETECT_MASK (1 << 4)
+
 
 /* pulse routines */
 
@@ -80,20 +86,61 @@ static inline void pimd_pulse_on(void)
   PIMD_IO_PULSE_PORT &= ~PIMD_IO_PULSE_MASK;
 }
 
+static inline void pimd_led_calib_off(void)
+{
+  PIMD_LED_CALIB_PORT &= ~PIMD_LED_CALIB_MASK;
+}
+
+static inline void pimd_led_calib_on(void)
+{
+  PIMD_LED_CALIB_PORT |= PIMD_LED_CALIB_MASK;
+}
+
+static inline void pimd_led_detect_off(void)
+{
+  PIMD_LED_DETECT_PORT &= ~PIMD_LED_DETECT_MASK;
+}
+
+static inline void pimd_led_detect_on(void)
+{
+  PIMD_LED_DETECT_PORT |= PIMD_LED_DETECT_MASK;
+}
+
 static void pimd_setup(void)
 {
-  /* setup io pins */
+  /* pulse output pin */
 
   PIMD_IO_PULSE_DDR |= PIMD_IO_PULSE_MASK;
   pimd_pulse_off();
 
+  /* calibration button and detect switch */
+  /* pullups enabled */
+  /* interrupt on change enabled */
+  /* warning: it assumes portc */
+
+  PIMD_IO_COMMON_DDR &= ~PIMD_IO_CALIB_MASK;
+  PIMD_IO_COMMON_PORT |= PIMD_IO_CALIB_MASK;
+
+  PIMD_IO_COMMON_DDR &= ~PIMD_IO_DETECT_MASK;
+  PIMD_IO_COMMON_PORT |= PIMD_IO_DETECT_MASK;
+
+  PCICR |= PIMD_IO_COMMON_PCICR_MASK;
+  PIMD_IO_COMMON_PCMSK |= PIMD_IO_CALIB_MASK;
+  PIMD_IO_COMMON_PCMSK |= PIMD_IO_DETECT_MASK;
+
+  /* leds */
+
+  PIMD_LED_DETECT_DDR |= PIMD_LED_DETECT_MASK;
+  pimd_led_detect_off();
+
+  PIMD_LED_CALIB_DDR |= PIMD_LED_CALIB_MASK;
+  pimd_led_calib_on();
+
+  /* backemf input pin */
+  /* pullup enabled */
+
   PIMD_IO_BEMF_DDR &= ~PIMD_IO_BEMF_MASK;
   PIMD_IO_BEMF_PORT |= PIMD_IO_BEMF_MASK;
-
-  /* TODO: setup calib button an pullup */
-  /* TODO: setup detect button an pullup */
-  /* TODO: setup calib led */
-  /* TODO: setup detect led */
 
   /* disable counter1 (ds, 15) */
 
@@ -102,6 +149,10 @@ static void pimd_setup(void)
   TCCR1C = 0;
   TIMSK1 = (1 << 5) | (1 << 1);
   TIFR1 = 0;
+
+  /* sleep mode */
+
+  set_sleep_mode(SLEEP_MODE_IDLE);
 }
 
 static volatile uint8_t pimd_timer1_isr = 0;
@@ -187,10 +238,9 @@ static void pimd_do_loop(uint16_t* n, uint8_t* mask)
   uint8_t i;
   uint32_t sum32;
 
-#define PIMD_LOOP_MASK_WAIT_ONE (1 << 0)
+#define PIMD_LOOP_WAIT_ONE_MASK (1 << 0)
   *mask = 0;
 
-#define PIMD_AVG_COUNT ((uint8_t)20)
   sum32 = 0;
   for (i = 0; i != PIMD_AVG_COUNT; ++i)
   {
@@ -200,32 +250,41 @@ static void pimd_do_loop(uint16_t* n, uint8_t* mask)
     if ((*n) == PIMD_WAIT_ONE_TICKS)
     {
       /* indicate the wait for 1 was reached */
-      *mask |= PIMD_LOOP_MASK_WAIT_ONE;
+      *mask |= PIMD_LOOP_WAIT_ONE_MASK;
     }
   }
 
   *n = (uint16_t)(sum32 / (uint32_t)i);
 }
 
-static void pimd_wait_event(uint8_t* mask)
+static volatile uint8_t pimd_pcint_pins = 0;
+
+ISR(PCINT1_vect)
 {
-#define PIMD_EV_MASK_CALIB (1 << 0)
-#define PIMD_EV_MASK_DETECT (1 << 1)
-  *mask = 0;
+  const uint8_t m = PIMD_IO_CALIB_MASK | PIMD_IO_DETECT_MASK;
 
-#if 0 /* TODO */
+  /* xor since inverted logic due to pullups */
+  pimd_pcint_pins = PIMD_IO_COMMON_PIN ^ m;
 
-  if (PIMD_IO_CALIB_PIN & PIMD_IO_CALIB_MASK)
-    *mask |= PIMD_EV_MASK_CALIB;
+  /* conserve only bits of interest */
+  pimd_pcint_pins &= m;
+}
 
-  if (PIMD_IO_DETECT_PIN & PIMD_IO_DETECT_MASK)
-    *mask |= PIMD_EV_MASK_DETECT;
+static void pimd_wait_pins(uint8_t* mask)
+{
+  cli();
 
-#else
+  *mask = pimd_pcint_pins;
 
-  *mask |= PIMD_EV_MASK_DETECT;
+  if (*mask == 0)
+  {
+    sleep_enable();
+    sei();
+    sleep_cpu();
+    sleep_bod_disable();
+  }
 
-#endif /* TODO */
+  sei();
 }
 
 
@@ -246,33 +305,52 @@ int main(void)
 
   while (1)
   {
-    pimd_wait_event(&mask);
+    /* disable detect led if not in detect mode */
+    if (!(pimd_pcint_pins & PIMD_IO_DETECT_MASK))
+      pimd_led_detect_off();
 
-    if (mask & PIMD_EV_MASK_CALIB)
+    /* wait for pin to be ready */
+    pimd_wait_pins(&mask);
+
+    if (mask & PIMD_IO_CALIB_MASK)
     {
-      pimd_do_loop(&n, &mask);
-
-      if (mask & PIMD_LOOP_MASK_WAIT_ONE)
+      uint8_t i;
+      for (i = 0; i != 5; ++i) pimd_do_loop(&n, &mask);
+      if (mask & PIMD_LOOP_WAIT_ONE_MASK)
       {
 	/* calibration failure */
+	pimd_led_calib_on();
 	uart_write((uint8_t*)"calib failed\r\n", 14);
       }
       else
       {
+	pimd_led_calib_off();
 	calib = n;
 	uart_write((uint8_t*)"calib ", 6);
 	uart_write(uint16_to_string(calib), 4);
 	uart_write((uint8_t*)"\r\n", 2);
       }
     }
-    else if (mask & PIMD_EV_MASK_DETECT)
+    else if (calib && (mask & PIMD_IO_DETECT_MASK))
     {
       pimd_do_loop(&n, &mask);
 
       /* compare to calibration value */
       if (n > (calib + 2))
       {
+	pimd_led_detect_on();
+
 	uart_write((uint8_t*)"detect ", 7);
+	uart_write(uint16_to_string(calib), 4);
+	uart_write((uint8_t*)" ", 1);
+	uart_write(uint16_to_string(n), 4);
+	uart_write((uint8_t*)"\r\n", 2);
+      }
+      else
+      {
+	pimd_led_detect_off();
+
+	uart_write((uint8_t*)"not detected ", 13);
 	uart_write(uint16_to_string(calib), 4);
 	uart_write((uint8_t*)" ", 1);
 	uart_write(uint16_to_string(n), 4);
