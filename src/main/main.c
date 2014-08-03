@@ -38,11 +38,18 @@
 #define PIMD_IO_CALIB_MASK (1 << 0)
 #endif /* TODO */
 
-/* pcint23, ain1, pd7 */
-#define PIMD_IO_BEMF_DDR DDRD
-#define PIMD_IO_BEMF_PIN PIND
-#define PIMD_IO_BEMF_PORT PORTD
-#define PIMD_IO_BEMF_MASK (1 << 7)
+#if 0 /* TODO */
+/* detect button */
+#define PIMD_IO_DETECT_DDR DDRC
+#define PIMD_IO_DETECT_PORT PORTC
+#define PIMD_IO_DETECT_MASK (1 << 0)
+#endif /* TODO */
+
+/* portb0, icp1 pin */
+#define PIMD_IO_BEMF_DDR DDRB
+#define PIMD_IO_BEMF_PIN PINB
+#define PIMD_IO_BEMF_PORT PORTB
+#define PIMD_IO_BEMF_MASK (1 << 0)
 
 /* pulse routines */
 
@@ -65,88 +72,84 @@ static void pimd_setup(void)
   PIMD_IO_BEMF_DDR &= ~PIMD_IO_BEMF_MASK;
   PIMD_IO_BEMF_PORT |= PIMD_IO_BEMF_MASK;
 
-/* #define CONFIG_ACMP */
-#ifdef CONFIG_ACMP
-  /* setup analog comparator. datasheet ch22. */
-  /* when AIN0(bandgap) > AIN1, then ACO is set */
-  /* setup to capture the value of counter1 */
-  /* AIN0 is set to bandgap voltage reference (1.81) */
-  /* AIN1 is wired to pin PIMD_IO_BEMF */
-  ADCSRB = 1 << 6;
-  ACSR = (1 << 7) | (1 << 6) | (1 << 2);
-  DIDR1 = (1 << 1) | (1 << 0);
-#endif /* CONFIG_ACMP */
+  /* disable counter1 (ds, 15) */
+  TCCR1B = 0;
+  TCCR1A = 0;
+  TCCR1C = 0;
+  TIMSK1 = (1 << 5) | (1 << 1);
+  TIFR1 = 0;
+}
 
-  /* setup timer */
-  /* normal counter */
+static volatile uint8_t pimd_timer1_isr;
+
+ISR(TIMER1_COMPA_vect)
+{
+  pimd_timer1_isr = 1;
+}
+
+ISR(TIMER1_CAPT_vect)
+{
+  pimd_timer1_isr = 1;
+}
+
+static void pimd_wait_bemf(uint8_t x, uint16_t* n, uint16_t m)
+{
+  /* wait the bemf pin to change value */
+  /* x the value waited for (0 or 1) */
+  /* *n the elapsed tick count */
+  /* m the maximum tick count */
+
+  pimd_timer1_isr = 0;
+
+  /* setup counter1 (ds, 15) */
+  /* ctc mode, top is ocr1a */
+  /* set icr1 to m, in case of no capture */
   /* noise canceler enabled */
   /* inverted capture edge */
-  TCCR1A = 0;
-  TCCR1B = (1 << 7) | (1 << 6);
 
-#ifdef CONFIG_ACMP
-  TIMSK1 = 1 << 5;
-#endif /* CONFIG_ACMP */
+  OCR1A = m;
+  ICR1 = m;
+  TCNT1 = 0;
+
+#define PIMD_TCCR1B_MASK ((1 << 7) | (1 << 3) | (1 << 0))
+  if (x)
+  {
+    /* rising edge triggers capture */
+    TCCR1B = PIMD_TCCR1B_MASK | (1 << 6);
+  }
+  else
+  {
+    /* falling edge triggers capture */
+    TCCR1B = PIMD_TCCR1B_MASK | (0 << 6);
+  }
+
+  while (pimd_timer1_isr == 0) ;
+  pimd_timer1_isr = 0;
+
+  *n = ICR1;
+
+  /* disable counter */
+  TCCR1B &= ~(1 << 0);
 }
+
+/* assumes the frequency is greater or equal to 1MHz */
+#define US_TO_TICKS(__us) \
+((uint16_t)((__us) * (F_CPU / 1000000L)))
 
 static void pimd_pulse_do(uint16_t* n)
 {
   /* n the captured counter value */
-
-  /* clear the ICF1 flag by writing one */
-  TIFR1 |= 1 << 5;
 
   /* actual pulse */
   pimd_pulse_on();
   _delay_us(PIMD_PULSE_ON_US);
   pimd_pulse_off();
 
-  /* set counter to 0 and enable */
-  TCNT1 = 0;
-  TCCR1B |= 1 << 0;
+  /* wait for pin to be 0 */
+  pimd_wait_bemf(0, n, US_TO_TICKS(50));
 
-#if 0
-  /* wait for the pin to be 0 */
-  while (1)
-  {
-    if ((PIMD_IO_BEMF_PIN & PIMD_IO_BEMF_MASK) == 0) break ;
-  }
-#else
-  _delay_us(5);
-#endif
-
-#ifdef CONFIG_ACMP
-  /* enable the comparator */
-  ACSR &= ~(1 << 7);
-
-  /* wait for the capture or timer top value */
-  while (1)
-  {
-    /* wait event capture by polling ICF1 */
-    if (TIFR1 | (1 << 5))
-    {
-      *n = ICR1;
-      break ;
-    }
-  }
-#elif 0
-  while (1)
-  {
-    if (PIMD_IO_BEMF_PIN & PIMD_IO_BEMF_MASK)
-    {
-      *n = TCNT1;
-      break ;
-    }
-  }
-#endif
-
-  /* disable counter */
-  TCCR1B &= ~(1 << 0);
-
-#ifdef CONFIG_ACMP
-  /* disable the comparator */
-  ACSR |= 1 << 7;
-#endif /* CONFIG_ACMP */
+  /* wait for pin to be 1 */
+  pimd_wait_bemf(1, n, US_TO_TICKS(200));
 
   /* wait before next pulse */
   _delay_ms(PIMD_PULSE_OFF_MS);
@@ -163,13 +166,19 @@ int main(void)
 
   uart_write((uint8_t*)"go\r\n", 4);
 
+  uart_write((uint8_t*)uint16_to_string(US_TO_TICKS(50)), 4);
+  uart_write((uint8_t*)"\r\n", 2);
+
+  uart_write((uint8_t*)uint16_to_string(US_TO_TICKS(200)), 4);
+  uart_write((uint8_t*)"\r\n", 2);
+
   sei();
 
   while (1)
   {
     /* averaging loop */
     sum = 0;
-    for (i = 0; i != 64; ++i)
+    for (i = 0; i != 16; ++i)
     {
       pimd_pulse_do(&n);
       sum += n;
