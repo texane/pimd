@@ -105,12 +105,14 @@ static void pimd_pulse_do(uint16_t* n)
   TCNT1 = 0;
   TCCR1B |= 1 << 0;
 
-#if 1
+#if 0
   /* wait for the pin to be 0 */
   while (1)
   {
     if ((PIMD_IO_BEMF_PIN & PIMD_IO_BEMF_MASK) == 0) break ;
   }
+#else
+  _delay_us(5);
 #endif
 
 #ifdef CONFIG_ACMP
@@ -127,7 +129,7 @@ static void pimd_pulse_do(uint16_t* n)
       break ;
     }
   }
-#else
+#elif 0
   while (1)
   {
     if (PIMD_IO_BEMF_PIN & PIMD_IO_BEMF_MASK)
