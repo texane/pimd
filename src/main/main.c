@@ -1,9 +1,16 @@
+/* TODO: store calibration value into eeprom */
+
+
 #include <stdint.h>
 #include <avr/io.h>
 #include <avr/sleep.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
+
+#define PIMD_CONFIG_UART 0
+#ifdef PIMD_CONFIG_UART
 #include "./uart.c"
+#endif /* PIMD_CONFIG_UART */
 
 
 /* pimd implementation */
@@ -33,8 +40,8 @@ static const uint16_t PIMD_WAIT_ZERO_TICKS = US_TO_TICKS(50);
 static const uint16_t PIMD_WAIT_ONE_TICKS = US_TO_TICKS(200);
 
 /* pulse on off durations */
-#define PIMD_PULSE_OFF_MS 4
-#define PIMD_PULSE_ON_US 150
+#define PIMD_PULSE_OFF_MS 5
+#define PIMD_PULSE_ON_US 100
 
 /* averaging loop count. with pimd_pulse_off, it gives */
 /* roughly the number of actual sample per second */
@@ -238,6 +245,8 @@ static void pimd_do_loop(uint16_t* n, uint8_t* mask)
   uint8_t i;
   uint32_t sum32;
 
+  PCICR &= ~PIMD_IO_COMMON_PCICR_MASK;
+
 #define PIMD_LOOP_WAIT_ONE_MASK (1 << 0)
   *mask = 0;
 
@@ -245,7 +254,7 @@ static void pimd_do_loop(uint16_t* n, uint8_t* mask)
   for (i = 0; i != PIMD_AVG_COUNT; ++i)
   {
     pimd_do_pulse(n);
-    sum32 += *n;
+    sum32 += (uint32_t)*n;
 
     if ((*n) == PIMD_WAIT_ONE_TICKS)
     {
@@ -255,6 +264,8 @@ static void pimd_do_loop(uint16_t* n, uint8_t* mask)
   }
 
   *n = (uint16_t)(sum32 / (uint32_t)i);
+
+  PCICR |= PIMD_IO_COMMON_PCICR_MASK;
 }
 
 static volatile uint8_t pimd_pcint_pins = 0;
@@ -296,10 +307,15 @@ int main(void)
   uint16_t calib = 0;
   uint16_t n;
 
+#ifdef PIMD_CONFIG_UART
   uart_setup();
+#endif /* PIMD_CONFIG_UART */
+
   pimd_setup();
 
+#ifdef PIMD_CONFIG_UART
   uart_write((uint8_t*)"go\r\n", 4);
+#endif /* PIMD_CONFIG_UART */
 
   sei();
 
@@ -314,21 +330,24 @@ int main(void)
 
     if (mask & PIMD_IO_CALIB_MASK)
     {
-      uint8_t i;
-      for (i = 0; i != 5; ++i) pimd_do_loop(&n, &mask);
+      pimd_do_loop(&n, &mask);
       if (mask & PIMD_LOOP_WAIT_ONE_MASK)
       {
 	/* calibration failure */
 	pimd_led_calib_on();
+#ifdef PIMD_CONFIG_UART
 	uart_write((uint8_t*)"calib failed\r\n", 14);
+#endif /* PIMD_CONFIG_UART */
       }
       else
       {
 	pimd_led_calib_off();
 	calib = n;
+#ifdef PIMD_CONFIG_UART
 	uart_write((uint8_t*)"calib ", 6);
-	uart_write(uint16_to_string(calib), 4);
+	uart_write(uint16_to_string(n), 4);
 	uart_write((uint8_t*)"\r\n", 2);
+#endif /* PIMD_CONFIG_UART */
       }
     }
     else if (calib && (mask & PIMD_IO_DETECT_MASK))
@@ -339,22 +358,24 @@ int main(void)
       if (n > (calib + 2))
       {
 	pimd_led_detect_on();
-
+#ifdef PIMD_CONFIG_UART
 	uart_write((uint8_t*)"detect ", 7);
 	uart_write(uint16_to_string(calib), 4);
 	uart_write((uint8_t*)" ", 1);
 	uart_write(uint16_to_string(n), 4);
 	uart_write((uint8_t*)"\r\n", 2);
+#endif /* PIMD_CONFIG_UART */
       }
       else
       {
 	pimd_led_detect_off();
-
+#ifdef PIMD_CONFIG_UART
 	uart_write((uint8_t*)"not detected ", 13);
 	uart_write(uint16_to_string(calib), 4);
 	uart_write((uint8_t*)" ", 1);
 	uart_write(uint16_to_string(n), 4);
 	uart_write((uint8_t*)"\r\n", 2);
+#endif /* PIMD_CONFIG_UART */
       }
     }
   }
